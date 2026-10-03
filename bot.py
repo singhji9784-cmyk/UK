@@ -1,6 +1,6 @@
 import os
-import re
 import difflib
+import time
 import requests
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
@@ -14,45 +14,53 @@ AudioSegment.converter = imageio_ffmpeg.get_ffmpeg_exe()
 # --- Configurations ---
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YAHAN_APNA_TELEGRAM_BOT_TOKEN_DAALEIN")
 
-# ⚠️ YAHAN APNI GITHUB RAW FILE KA LINK DAALEIN:
-# Example: "https://raw.githubusercontent.com/singhji97/UK/main/questions.txt"
+# Apni GitHub raw file ka URL yahan dalein:
 GITHUB_RAW_URL = os.getenv(
     "GITHUB_RAW_URL", 
     "https://raw.githubusercontent.com/singhji97/UK/main/questions.txt"
 )
 
-# Global list for questions
 QUESTIONS = []
 
+# Naya Full-Text Parser (Ab kitne bhi paragraphs ho, poora answer lega)
 def parse_questions_content(content):
     entries = content.split("---")
     qa_list = []
     for entry in entries:
-        q_match = re.search(r"Q:\s*(.+)", entry)
-        a_match = re.search(r"A:\s*(.+)", entry)
-        if q_match and a_match:
-            qa_list.append({
-                "question": q_match.group(1).strip(),
-                "answer": a_match.group(1).strip()
-            })
+        entry = entry.strip()
+        if not entry:
+            continue
+        
+        # Q: aur A: ko bina kisi line limit ke extract karega
+        if "Q:" in entry and "A:" in entry:
+            parts = entry.split("A:", 1)
+            q_part = parts[0].replace("Q:", "", 1).strip()
+            a_part = parts[1].strip()  # Poora multiline answer lega
+            if q_part and a_part:
+                qa_list.append({
+                    "question": q_part,
+                    "answer": a_part
+                })
     return qa_list
 
-# GitHub ya Local file se turant reload karne ka function
+# GitHub se Live Fresh File laane ka function (No Cache)
 def reload_questions():
     global QUESTIONS
-    # 1. Pehle GitHub raw link se live fetch karega (Bina deploy wait kiye)
     if GITHUB_RAW_URL and "githubusercontent.com" in GITHUB_RAW_URL:
         try:
-            # Cache bypass karne ke liye timestamp lagaya hai
-            url = f"{GITHUB_RAW_URL}?t={os.urandom(4).hex()}"
-            response = requests.get(url, timeout=10)
+            # Cache bypass karne ke liye timestamp + headers
+            url = f"{GITHUB_RAW_URL}?t={int(time.time())}"
+            headers = {
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache"
+            }
+            response = requests.get(url, headers=headers, timeout=10)
             if response.status_code == 200:
                 QUESTIONS = parse_questions_content(response.text)
-                return True, f"GitHub se {len(QUESTIONS)} questions turant load ho gaye!"
+                return True, f"GitHub se {len(QUESTIONS)} questions (Full Answers ke sath) load ho gaye!"
         except Exception as e:
             print(f"GitHub fetch error: {e}")
 
-    # 2. Agar GitHub link na mile to local questions.txt padhega
     if os.path.exists("questions.txt"):
         with open("questions.txt", "r", encoding="utf-8") as f:
             QUESTIONS = parse_questions_content(f.read())
@@ -60,7 +68,7 @@ def reload_questions():
     
     return False, "questions.txt file nahi mili!"
 
-# Shuru me questions load karein
+# Start me load karein
 reload_questions()
 recognizer = sr.Recognizer()
 
@@ -71,30 +79,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reload_questions()
 
     if not QUESTIONS:
-        await update.message.reply_text("⚠️ Koi questions nahi mile! Kripya GitHub me questions.txt check karein.")
+        await update.message.reply_text("⚠️ questions.txt file me koi questions nahi mile!")
         return
 
     await update.message.reply_text(
         "🇬🇧 *UK Visa Interview Practice Bot* me aapka swagat hai!\n\n"
         "🔹 Sawal aane par apna answer **Voice Note (bolkar)** bhejein.\n"
-        "🔹 Naye questions load karne ke liye **/reset** ya **/reload** dabayein.\n\n"
+        "🔹 GitHub par kuch bhi badalne ke baad **/reset** dabayein.\n\n"
         "Taiyaar hone par niche pehla sawal dekhein 👇",
         parse_mode="Markdown"
     )
     await ask_question(update, context)
 
-# /reset Command (Purana data hatayega aur naye questions load karega)
+# /reset Command
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # User ka interview index reset karo
     context.user_data["q_index"] = 0
-    
-    # GitHub se naye questions turant download karo
     success, msg = reload_questions()
     
     if success:
         await update.message.reply_text(
-            f"🔄 *Reset Successful!*\n\n{msg}\n"
-            "Purana interview cancel ho gaya hai aur naye questions load ho chuke hain.\n\n"
+            f"🔄 *Reset Successful!*\n\n{msg}\n\n"
             "Chaliye shuru karte hain 👇",
             parse_mode="Markdown"
         )
@@ -114,28 +118,27 @@ async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.effective_chat.send_message(msg, parse_mode="Markdown")
     else:
         await update.effective_chat.send_message(
-            "🎉 *Interview Complete! Aapne sabhi sawalo ke jawab de diye hain.*\n"
-            "Dobara shuru karne ke liye ya naye questions ke liye **/reset** dabayein.",
+            "🎉 *Interview Complete! Sabhi questions poore ho gaye.*\n"
+            "Naye questions ke sath shuru karne ke liye **/reset** dabayein.",
             parse_mode="Markdown"
         )
 
-# Handle Voice Answers
+# Handle Voice
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     idx = context.user_data.get("q_index", 0)
     if idx >= len(QUESTIONS):
-        await update.message.reply_text("Interview pehle hi khatam ho chuka hai. Naye questions ke liye /reset dabayein.")
+        await update.message.reply_text("Interview complete ho chuka hai. Dobara shuru karne ke liye /reset dabayein.")
         return
 
     status_msg = await update.message.reply_text("⏳ Processing audio...")
 
-    # 1. Download voice file
     voice_file = await update.message.voice.get_file()
     user_id = update.message.from_user.id
     oga_path = f"temp_{user_id}.oga"
     wav_path = f"temp_{user_id}.wav"
     await voice_file.download_to_drive(oga_path)
 
-    # 2. Convert to wav
+    # Convert to wav
     try:
         audio = AudioSegment.from_file(oga_path)
         audio.export(wav_path, format="wav")
@@ -144,7 +147,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if os.path.exists(oga_path): os.remove(oga_path)
         return
 
-    # 3. Speech Recognition
+    # Speech Recognition
     try:
         with sr.AudioFile(wav_path) as source:
             audio_data = recognizer.record(source)
@@ -160,13 +163,14 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if os.path.exists(wav_path): os.remove(wav_path)
         return
 
-    # Cleanup temp files
     if os.path.exists(oga_path): os.remove(oga_path)
     if os.path.exists(wav_path): os.remove(wav_path)
 
-    # 4. Compare Answer
+    # Clean text comparison
     expected_answer = QUESTIONS[idx]["answer"]
-    similarity = difflib.SequenceMatcher(None, user_text.lower(), expected_answer.lower()).ratio() * 100
+    clean_user = " ".join(user_text.lower().split())
+    clean_exp = " ".join(expected_answer.lower().split())
+    similarity = difflib.SequenceMatcher(None, clean_user, clean_exp).ratio() * 100
 
     feedback = (
         f"🗣️ *Aapne bola:*\n\"{user_text}\"\n\n"
@@ -175,11 +179,9 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await status_msg.edit_text(feedback, parse_mode="Markdown")
 
-    # Next Question
     context.user_data["q_index"] = idx + 1
     await ask_question(update, context)
 
-# Main
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
