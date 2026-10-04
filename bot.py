@@ -2,10 +2,17 @@ import os
 import difflib
 import time
 import threading
+import base64
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder, 
+    CommandHandler, 
+    MessageHandler, 
+    filters, 
+    ContextTypes
+)
 import speech_recognition as sr
 from pydub import AudioSegment
 import imageio_ffmpeg
@@ -13,18 +20,22 @@ import imageio_ffmpeg
 # Set ffmpeg path for pydub
 AudioSegment.converter = imageio_ffmpeg.get_ffmpeg_exe()
 
-# --- Configurations ---
-BOT_TOKEN = os.getenv("BOT_TOKEN", "YAHAN_APNA_TELEGRAM_BOT_TOKEN_DAALEIN")
+# ==================== CONFIGURATIONS ====================
+BOT_TOKEN = os.getenv("BOT_TOKEN", "YAHAN_BOT_TOKEN_DAALEIN")
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "")
 
-GITHUB_RAW_URL = os.getenv(
-    "GITHUB_RAW_URL", 
-    "https://raw.githubusercontent.com/singhji97/UK/main/questions.txt"
-)
+# GitHub API Configurations
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "") # GitHub Personal Access Token
+GITHUB_REPO = os.getenv("GITHUB_REPO", "singhji97/UK") # format: username/repo
+GITHUB_FILE_PATH = os.getenv("GITHUB_FILE_PATH", "questions.txt")
+
+# Security: Apna Telegram User ID yahan daalein (taaki koi dusra delete/upload na kare)
+# Check karne ke liye Telegram par @userinfobot ko message karein
+ADMIN_ID = os.getenv("ADMIN_ID", "") 
 
 QUESTIONS = []
 
-# --- Keep-Alive HTTP Server ---
+# ==================== 1. KEEP-ALIVE PING SERVER ====================
 class PingServerHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -55,9 +66,67 @@ def auto_keep_alive_ping():
         except Exception as e:
             print(f"[Keep-Alive] Ping error: {e}")
 
-        time.sleep(600)
+        time.sleep(600)  # Har 10 minute me ping
 
-# --- Parser & Logic ---
+# ==================== 2. GITHUB API FUNCTIONS ====================
+def get_github_headers():
+    return {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+
+def get_github_file_sha():
+    """File ka SHA nikalta hai jo update/delete karne ke liye zaroori hota hai"""
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_FILE_PATH}"
+    res = requests.get(url, headers=get_github_headers(), timeout=10)
+    if res.status_code == 200:
+        return res.json().get("sha")
+    return None
+
+def upload_file_to_github(file_bytes):
+    """GitHub API ke through file ko create ya update karega"""
+    if not GITHUB_TOKEN:
+        return False, "GITHUB_TOKEN configure nahi hai!"
+
+    sha = get_github_file_sha()
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_FILE_PATH}"
+    
+    b64_content = base64.b64encode(file_bytes).decode("utf-8")
+    payload = {
+        "message": "Update questions via Telegram Bot",
+        "content": b64_content
+    }
+    if sha:
+        payload["sha"] = sha
+
+    res = requests.put(url, headers=get_github_headers(), json=payload, timeout=15)
+    if res.status_code in [200, 201]:
+        return True, "File GitHub par successfully save/update ho gayi!"
+    else:
+        return False, f"GitHub Error ({res.status_code}): {res.text}"
+
+def delete_file_from_github():
+    """GitHub API ke through file ko delete karega"""
+    if not GITHUB_TOKEN:
+        return False, "GITHUB_TOKEN configure nahi hai!"
+
+    sha = get_github_file_sha()
+    if not sha:
+        return False, "File GitHub par nahi mili ya pehle se deleted hai."
+
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_FILE_PATH}"
+    payload = {
+        "message": "Deleted questions.txt via Telegram Bot",
+        "sha": sha
+    }
+
+    res = requests.delete(url, headers=get_github_headers(), json=payload, timeout=15)
+    if res.status_code == 200:
+        return True, "File GitHub se delete ho gayi!"
+    else:
+        return False, f"GitHub Error ({res.status_code}): {res.text}"
+
+# ==================== 3. QUESTIONS PARSER ====================
 def parse_questions_content(content):
     entries = content.split("---")
     qa_list = []
@@ -77,46 +146,54 @@ def parse_questions_content(content):
     return qa_list
 
 def reload_questions():
+    """GitHub Raw URL ya GitHub API se live data laata hai"""
     global QUESTIONS
-    if GITHUB_RAW_URL and "githubusercontent.com" in GITHUB_RAW_URL:
-        try:
-            url = f"{GITHUB_RAW_URL}?t={int(time.time())}"
-            headers = {
-                "Cache-Control": "no-cache",
-                "Pragma": "no-cache"
-            }
-            response = requests.get(url, headers=headers, timeout=10)
-            if response.status_code == 200:
-                QUESTIONS = parse_questions_content(response.text)
-                return True, f"GitHub se {len(QUESTIONS)} questions load ho gaye!"
-        except Exception as e:
-            print(f"GitHub fetch error: {e}")
+    raw_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/{GITHUB_FILE_PATH}?t={int(time.time())}"
+    try:
+        headers = {"Cache-Control": "no-cache", "Pragma": "no-cache"}
+        res = requests.get(raw_url, headers=headers, timeout=10)
+        if res.status_code == 200:
+            QUESTIONS = parse_questions_content(res.text)
+            return True, f"GitHub se {len(QUESTIONS)} questions load ho gaye!"
+    except Exception as e:
+        print(f"Error fetching questions: {e}")
 
     if os.path.exists("questions.txt"):
         with open("questions.txt", "r", encoding="utf-8") as f:
             QUESTIONS = parse_questions_content(f.read())
-        return True, f"Local questions.txt se {len(QUESTIONS)} questions load ho gaye!"
-    
-    return False, "questions.txt file nahi mili!"
+        return True, f"Local file se {len(QUESTIONS)} questions load ho gaye!"
 
+    return False, "Koi questions nahi mile!"
+
+# Initial load
 reload_questions()
 recognizer = sr.Recognizer()
 
-# --- Handlers ---
+# Admin Check Helper
+def is_admin(user_id):
+    if not ADMIN_ID:
+        return True  # Agar ADMIN_ID set nahi kiya to sab use kar sakte hain
+    return str(user_id) == str(ADMIN_ID)
+
+# ==================== 4. BOT HANDLERS ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["q_index"] = 0
     if not QUESTIONS:
         reload_questions()
 
     if not QUESTIONS:
-        await update.message.reply_text("⚠️ questions.txt file me koi questions nahi mile!")
+        await update.message.reply_text(
+            "⚠️ Abhi koi questions upload nahi hain!\n\n"
+            "👉 Aap seedha apni `.txt` file yahan send karein, bot automatic ise GitHub par save kar lega."
+        )
         return
 
     await update.message.reply_text(
         "🇬🇧 *UK Visa Interview Practice Bot* me aapka swagat hai!\n\n"
         "🔹 Sawal aane par apna answer **Voice Note (bolkar)** bhejein.\n"
-        "🔹 GitHub par kuch bhi badalne ke baad **/reset** dabayein.\n\n"
-        "Taiyaar hone par niche pehla sawal dekhein 👇",
+        "🔹 Nayi file lagane ke liye sirf **.txt file send** kar dein.\n"
+        "🔹 Sabhi sawal hatane ke liye **/delete** dabayein.\n\n"
+        "Pehla sawal niche dekhein 👇",
         parse_mode="Markdown"
     )
     await ask_question(update, context)
@@ -124,16 +201,77 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["q_index"] = 0
     success, msg = reload_questions()
-    
     if success:
-        await update.message.reply_text(
-            f"🔄 *Reset Successful!*\n\n{msg}\n\n"
-            "Chaliye shuru karte hain 👇",
-            parse_mode="Markdown"
-        )
+        await update.message.reply_text(f"🔄 *Reset Successful!*\n\n{msg}", parse_mode="Markdown")
         await ask_question(update, context)
     else:
         await update.message.reply_text(f"❌ Error: {msg}")
+
+# /delete Command - File ko GitHub se aur memory se delete karne ke liye
+async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global QUESTIONS
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Aapko delete karne ki permission nahi hai!")
+        return
+
+    status_msg = await update.message.reply_text("⏳ GitHub se file delete ho rahi hai...")
+    success, msg = delete_file_from_github()
+
+    if success:
+        QUESTIONS = []
+        context.user_data["q_index"] = 0
+        if os.path.exists("questions.txt"):
+            os.remove("questions.txt")
+        await status_msg.edit_text("🗑️ *Sabhi Questions Delete ho gaye!* Ab bot khali hai.", parse_mode="Markdown")
+    else:
+        await status_msg.edit_text(f"❌ Delete Failed: {msg}")
+
+# Automatic Document / TXT File Handler
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global QUESTIONS
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Aapko file upload karne ki permission nahi hai!")
+        return
+
+    doc = update.message.document
+    if not doc.file_name.lower().endswith(".txt"):
+        await update.message.reply_text("⚠️ Kripya sirf `.txt` format wali file hi bhejein!")
+        return
+
+    status_msg = await update.message.reply_text("📥 File download ho rahi hai...")
+    
+    file = await doc.get_file()
+    file_bytes = await file.download_as_bytearray()
+    content_text = file_bytes.decode("utf-8", errors="ignore")
+
+    # Validate questions format
+    parsed = parse_questions_content(content_text)
+    if not parsed:
+        await status_msg.edit_text(
+            "❌ File me `Q:` aur `A:` format ke questions nahi mile!\n"
+            "Format example:\n\nQ: Why UK?\nA: Because...\n---"
+        )
+        return
+
+    await status_msg.edit_text("🚀 GitHub par automatically upload kiya jaa raha hai...")
+
+    # Upload to GitHub via API
+    success, msg = upload_file_to_github(file_bytes)
+    if success:
+        QUESTIONS = parsed
+        context.user_data["q_index"] = 0
+        # Local backup bhi update kar lein
+        with open("questions.txt", "w", encoding="utf-8") as f:
+            f.write(content_text)
+
+        await status_msg.edit_text(
+            f"✅ *File Successfully GitHub Par Save Ho Gayi!*\n\n"
+            f"📊 Kul *{len(QUESTIONS)}* questions load ho chuke hain.\n"
+            f"Interview shuru karne ke liye **/start** dabayein.",
+            parse_mode="Markdown"
+        )
+    else:
+        await status_msg.edit_text(f"❌ GitHub Upload Failed:\n`{msg}`", parse_mode="Markdown")
 
 async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     idx = context.user_data.get("q_index", 0)
@@ -146,15 +284,14 @@ async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.effective_chat.send_message(msg, parse_mode="Markdown")
     else:
         await update.effective_chat.send_message(
-            "🎉 *Interview Complete! Sabhi questions poore ho gaye.*\n"
-            "Naye questions ke sath shuru karne ke liye **/reset** dabayein.",
+            "🎉 *Interview Complete!*\nNaye questions upload karne ke liye file bhejein ya **/reset** dabayein.",
             parse_mode="Markdown"
         )
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     idx = context.user_data.get("q_index", 0)
     if idx >= len(QUESTIONS):
-        await update.message.reply_text("Interview complete ho chuka hai. Dobara shuru karne ke liye /reset dabayein.")
+        await update.message.reply_text("Koi active interview nahi hai. Shuru karne ke liye /start dabayein.")
         return
 
     status_msg = await update.message.reply_text("⏳ Processing audio...")
@@ -218,6 +355,11 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("reset", reset_command))
     app.add_handler(CommandHandler("reload", reset_command))
+    app.add_handler(CommandHandler("delete", delete_command))
+    
+    # Document / TXT file handler
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    # Voice handler
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
 
     print("Bot is running...")
