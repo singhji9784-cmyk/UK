@@ -25,12 +25,13 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "YAHAN_BOT_TOKEN_DAALEIN")
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "")
 
 # GitHub API Configurations
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "") # GitHub Personal Access Token
-GITHUB_REPO = os.getenv("GITHUB_REPO", "singhji97/UK") # format: username/repo
-GITHUB_FILE_PATH = os.getenv("GITHUB_FILE_PATH", "questions.txt")
+# Note: Token me 'repo' scope ka hona zaroori hai
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip() 
+GITHUB_REPO = os.getenv("GITHUB_REPO", "singhji97/UK").strip()
+GITHUB_FILE_PATH = os.getenv("GITHUB_FILE_PATH", "questions.txt").strip()
+GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main").strip()
 
-# Security: Apna Telegram User ID yahan daalein (taaki koi dusra delete/upload na kare)
-# Check karne ke liye Telegram par @userinfobot ko message karein
+# Security: Telegram User ID (Khali chhodne par sabhi use kar sakte hain)
 ADMIN_ID = os.getenv("ADMIN_ID", "") 
 
 QUESTIONS = []
@@ -70,23 +71,31 @@ def auto_keep_alive_ping():
 
 # ==================== 2. GITHUB API FUNCTIONS ====================
 def get_github_headers():
+    """GitHub API ke standard headers (User-Agent aur Auth zaroori hote hain)"""
     return {
         "Authorization": f"Bearer {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github.v3+json"
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "UKVisa-Telegram-Bot",
+        "X-GitHub-Api-Version": "2022-11-28"
     }
 
 def get_github_file_sha():
-    """File ka SHA nikalta hai jo update/delete karne ke liye zaroori hota hai"""
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_FILE_PATH}"
-    res = requests.get(url, headers=get_github_headers(), timeout=10)
-    if res.status_code == 200:
-        return res.json().get("sha")
+    """File ka SHA nikalta hai jo update karne ke liye zaroori hota hai"""
+    if not GITHUB_TOKEN:
+        return None
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_FILE_PATH}?ref={GITHUB_BRANCH}"
+    try:
+        res = requests.get(url, headers=get_github_headers(), timeout=10)
+        if res.status_code == 200:
+            return res.json().get("sha")
+    except Exception as e:
+        print(f"SHA fetch error: {e}")
     return None
 
 def upload_file_to_github(file_bytes):
     """GitHub API ke through file ko create ya update karega"""
     if not GITHUB_TOKEN:
-        return False, "GITHUB_TOKEN configure nahi hai!"
+        return False, "GITHUB_TOKEN configure nahi hai! Render/Environment me GITHUB_TOKEN set karein."
 
     sha = get_github_file_sha()
     url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_FILE_PATH}"
@@ -94,16 +103,29 @@ def upload_file_to_github(file_bytes):
     b64_content = base64.b64encode(file_bytes).decode("utf-8")
     payload = {
         "message": "Update questions via Telegram Bot",
-        "content": b64_content
+        "content": b64_content,
+        "branch": GITHUB_BRANCH
     }
+    
+    # Agar file pehle se maujood hai toh SHA dena mandatory hai
     if sha:
         payload["sha"] = sha
 
-    res = requests.put(url, headers=get_github_headers(), json=payload, timeout=15)
-    if res.status_code in [200, 201]:
-        return True, "File GitHub par successfully save/update ho gayi!"
-    else:
-        return False, f"GitHub Error ({res.status_code}): {res.text}"
+    try:
+        res = requests.put(url, headers=get_github_headers(), json=payload, timeout=15)
+        if res.status_code in [200, 201]:
+            return True, "File GitHub par successfully save/update ho gayi!"
+        elif res.status_code == 404:
+            return False, (
+                f"GitHub Error (404 Not Found):\n"
+                f"1. Check karein repo '{GITHUB_REPO}' sahi hai ya nahi.\n"
+                f"2. GITHUB_TOKEN me 'repo' (write permission) tick hai ya nahi.\n"
+                f"3. GitHub repo khali toh nahi hai? (README file banayein)."
+            )
+        else:
+            return False, f"GitHub Error ({res.status_code}): {res.text}"
+    except Exception as e:
+        return False, f"Request failed: {str(e)}"
 
 def delete_file_from_github():
     """GitHub API ke through file ko delete karega"""
@@ -117,14 +139,18 @@ def delete_file_from_github():
     url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_FILE_PATH}"
     payload = {
         "message": "Deleted questions.txt via Telegram Bot",
-        "sha": sha
+        "sha": sha,
+        "branch": GITHUB_BRANCH
     }
 
-    res = requests.delete(url, headers=get_github_headers(), json=payload, timeout=15)
-    if res.status_code == 200:
-        return True, "File GitHub se delete ho gayi!"
-    else:
-        return False, f"GitHub Error ({res.status_code}): {res.text}"
+    try:
+        res = requests.delete(url, headers=get_github_headers(), json=payload, timeout=15)
+        if res.status_code == 200:
+            return True, "File GitHub se delete ho gayi!"
+        else:
+            return False, f"GitHub Error ({res.status_code}): {res.text}"
+    except Exception as e:
+        return False, f"Request failed: {str(e)}"
 
 # ==================== 3. QUESTIONS PARSER ====================
 def parse_questions_content(content):
@@ -146,15 +172,16 @@ def parse_questions_content(content):
     return qa_list
 
 def reload_questions():
-    """GitHub Raw URL ya GitHub API se live data laata hai"""
+    """GitHub Raw URL ya Local file se questions load karta hai"""
     global QUESTIONS
-    raw_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/{GITHUB_FILE_PATH}?t={int(time.time())}"
+    raw_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_BRANCH}/{GITHUB_FILE_PATH}?t={int(time.time())}"
     try:
         headers = {"Cache-Control": "no-cache", "Pragma": "no-cache"}
         res = requests.get(raw_url, headers=headers, timeout=10)
         if res.status_code == 200:
             QUESTIONS = parse_questions_content(res.text)
-            return True, f"GitHub se {len(QUESTIONS)} questions load ho gaye!"
+            if QUESTIONS:
+                return True, f"GitHub se {len(QUESTIONS)} questions load ho gaye!"
     except Exception as e:
         print(f"Error fetching questions: {e}")
 
@@ -172,7 +199,7 @@ recognizer = sr.Recognizer()
 # Admin Check Helper
 def is_admin(user_id):
     if not ADMIN_ID:
-        return True  # Agar ADMIN_ID set nahi kiya to sab use kar sakte hain
+        return True
     return str(user_id) == str(ADMIN_ID)
 
 # ==================== 4. BOT HANDLERS ====================
@@ -207,7 +234,6 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(f"❌ Error: {msg}")
 
-# /delete Command - File ko GitHub se aur memory se delete karne ke liye
 async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global QUESTIONS
     if not is_admin(update.effective_user.id):
@@ -224,9 +250,8 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             os.remove("questions.txt")
         await status_msg.edit_text("🗑️ *Sabhi Questions Delete ho gaye!* Ab bot khali hai.", parse_mode="Markdown")
     else:
-        await status_msg.edit_text(f"❌ Delete Failed: {msg}")
+        await status_msg.edit_text(f"❌ Delete Failed:\n`{msg}`", parse_mode="Markdown")
 
-# Automatic Document / TXT File Handler
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global QUESTIONS
     if not is_admin(update.effective_user.id):
@@ -244,7 +269,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file_bytes = await file.download_as_bytearray()
     content_text = file_bytes.decode("utf-8", errors="ignore")
 
-    # Validate questions format
     parsed = parse_questions_content(content_text)
     if not parsed:
         await status_msg.edit_text(
@@ -255,12 +279,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await status_msg.edit_text("🚀 GitHub par automatically upload kiya jaa raha hai...")
 
-    # Upload to GitHub via API
     success, msg = upload_file_to_github(file_bytes)
     if success:
         QUESTIONS = parsed
         context.user_data["q_index"] = 0
-        # Local backup bhi update kar lein
         with open("questions.txt", "w", encoding="utf-8") as f:
             f.write(content_text)
 
@@ -271,7 +293,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
     else:
-        await status_msg.edit_text(f"❌ GitHub Upload Failed:\n`{msg}`", parse_mode="Markdown")
+        await status_msg.edit_text(f"❌ {msg}", parse_mode="Markdown")
 
 async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     idx = context.user_data.get("q_index", 0)
