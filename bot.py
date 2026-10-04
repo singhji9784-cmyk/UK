@@ -24,12 +24,13 @@ AudioSegment.converter = imageio_ffmpeg.get_ffmpeg_exe()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YAHAN_BOT_TOKEN_DAALEIN")
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "")
 
-# GitHub API Configurations (Sahi username singhji9784 hai)
+# GitHub Configurations (Aapki exact repository)
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip() 
-GITHUB_REPO = os.getenv("GITHUB_REPO", "singhji9784/UK").strip()
+GITHUB_REPO = os.getenv("GITHUB_REPO", "singhji9784-cmyk/UK").strip()
 GITHUB_FILE_PATH = os.getenv("GITHUB_FILE_PATH", "questions.txt").strip()
 GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main").strip()
 
+# Admin check (khali chhodne par sab use kar sakte hain)
 ADMIN_ID = os.getenv("ADMIN_ID", "").strip() 
 
 QUESTIONS = []
@@ -65,7 +66,7 @@ def auto_keep_alive_ping():
         except Exception as e:
             print(f"[Keep-Alive] Ping error: {e}")
 
-        time.sleep(600)
+        time.sleep(600)  # Har 10 minute me ping
 
 # ==================== 2. GITHUB API FUNCTIONS ====================
 def get_github_headers():
@@ -86,13 +87,13 @@ def get_github_file_sha():
         if res.status_code == 200:
             return res.json().get("sha")
     except Exception as e:
-        print(f"SHA Error: {e}")
+        print(f"SHA fetch error: {e}")
     return None
 
 def upload_file_to_github(file_bytes):
     """GitHub API ke through file upload ya update karega"""
     if not GITHUB_TOKEN:
-        return False, "GITHUB_TOKEN Render me set nahi hai!"
+        return False, "GITHUB_TOKEN Render me set nahi hai! Kripya environment variable me token daalein."
 
     sha = get_github_file_sha()
     url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_FILE_PATH}"
@@ -282,7 +283,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Interview shuru karne ke liye /start dabayein."
         )
     else:
-        # Plain text without markdown parse mode so it never crashes
         await status_msg.edit_text(f"❌ Upload Failed:\n{msg}")
 
 async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
