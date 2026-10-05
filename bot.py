@@ -1,4 +1,5 @@
 import os
+import re
 import difflib
 import time
 import threading
@@ -34,6 +35,21 @@ GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main").strip()
 ADMIN_ID = os.getenv("ADMIN_ID", "").strip()
 
 QUESTIONS = []
+
+# Basic English Stopwords (Keywords filter karne ke liye)
+STOPWORDS = {
+    "a", "about", "above", "after", "again", "against", "all", "am", "an", "and", "any", "are", 
+    "as", "at", "be", "because", "been", "before", "being", "below", "between", "both", "but", 
+    "by", "can", "could", "did", "do", "does", "doing", "down", "during", "each", "few", "for", 
+    "from", "further", "had", "has", "have", "having", "he", "her", "here", "hers", "herself", 
+    "him", "himself", "his", "how", "i", "if", "in", "into", "is", "it", "its", "itself", "just", 
+    "me", "more", "most", "my", "myself", "no", "nor", "not", "of", "off", "on", "once", "only", 
+    "or", "other", "our", "ours", "ourselves", "out", "over", "own", "same", "she", "should", 
+    "so", "some", "such", "than", "that", "the", "their", "theirs", "them", "themselves", "then", 
+    "there", "these", "they", "this", "those", "through", "to", "too", "under", "until", "up", 
+    "very", "was", "we", "were", "what", "when", "where", "which", "while", "who", "whom", "why", 
+    "with", "would", "you", "your", "yours", "yourself", "yourselves"
+}
 
 # ==================== 1. KEEP-ALIVE PING SERVER ====================
 class PingServerHandler(BaseHTTPRequestHandler):
@@ -92,7 +108,7 @@ def get_github_file():
             raw_text = base64.b64decode(content_b64).decode("utf-8", errors="ignore")
             return raw_text, data.get("sha")
         elif res.status_code == 404:
-            return False, None  # File delete ho chuki hai
+            return False, None
     except Exception as e:
         print(f"GitHub fetch error: {e}")
     return None, None
@@ -102,7 +118,6 @@ def get_github_file_sha():
     return sha
 
 def upload_file_to_github(file_bytes):
-    """GitHub API ke through file upload ya update karega"""
     if not GITHUB_TOKEN:
         return False, "GITHUB_TOKEN Render me set nahi hai!"
 
@@ -178,17 +193,14 @@ def parse_questions_content(content):
 
 def reload_questions():
     global QUESTIONS
-    QUESTIONS = []  # Reload hote hi hamesha pehle purani memory clear karein
+    QUESTIONS = []
 
     if GITHUB_TOKEN:
         content, sha = get_github_file()
         if content is False:
-            # File GitHub par deleted hai (404)
             if os.path.exists("questions.txt"):
-                try:
-                    os.remove("questions.txt")
-                except Exception:
-                    pass
+                try: os.remove("questions.txt")
+                except: pass
             return False, "GitHub par file nahi mili (Deleted). Sabhi questions clear hain!"
         elif content:
             parsed = parse_questions_content(content)
@@ -199,13 +211,10 @@ def reload_questions():
                 return True, f"GitHub se {len(QUESTIONS)} questions load ho gaye!"
             else:
                 if os.path.exists("questions.txt"):
-                    try:
-                        os.remove("questions.txt")
-                    except Exception:
-                        pass
+                    try: os.remove("questions.txt")
+                    except: pass
                 return False, "File khali hai, koi question nahi mila."
 
-    # Agar token na ho toh local file read karein
     if os.path.exists("questions.txt"):
         try:
             with open("questions.txt", "r", encoding="utf-8") as f:
@@ -227,7 +236,97 @@ def is_admin(user_id):
         return True
     return str(user_id) == str(ADMIN_ID)
 
-# ==================== 4. BOT HANDLERS ====================
+# ==================== 4. SPEECH EVALUATION ENGINE ====================
+def extract_keywords(text):
+    words = re.findall(r'\b[a-zA-Z]{3,}\b', text.lower())
+    return [w for w in words if w not in STOPWORDS]
+
+def evaluate_speech(user_text, expected_answer, audio_duration_sec, google_confidence):
+    # 1. Fluency & WPM Calculation
+    duration_sec = max(1.0, audio_duration_sec)
+    spoken_words = user_text.strip().split()
+    word_count = len(spoken_words)
+    wpm = int((word_count / duration_sec) * 60)
+
+    # Visa/IELTS Interview Standard Speed: 110 - 150 WPM
+    if 115 <= wpm <= 155:
+        fluency_score = min(100.0, 92.0 + (8.0 * (1 - abs(135 - wpm) / 20.0)))
+        fluency_remark = "🎯 Perfect Speaking Pace (Ekdum sahi speed)"
+    elif 90 <= wpm < 115:
+        fluency_score = 75.0 + ((wpm - 90) / 25.0) * 15.0
+        fluency_remark = "🐢 Thoda slow tha, thodi flow badhayein"
+    elif 155 < wpm <= 185:
+        fluency_score = 75.0 + ((185 - wpm) / 30.0) * 15.0
+        fluency_remark = "⚡ Thoda fast tha, aaram se clear bole"
+    elif wpm < 90:
+        fluency_score = max(35.0, 45.0 + (wpm / 90.0) * 25.0)
+        fluency_remark = "⚠️ Bahut ruk-ruk ke bola, bina dare flow me bole"
+    else:
+        fluency_score = max(40.0, 70.0 - ((wpm - 185) / 50.0) * 25.0)
+        fluency_remark = "⚠️ Bahut jyada tezi se bola, shanti se bole"
+
+    # 2. Accuracy & Content Matching (Keywords + Sequence)
+    clean_user = " ".join(user_text.lower().split())
+    clean_exp = " ".join(expected_answer.lower().split())
+    seq_ratio = difflib.SequenceMatcher(None, clean_user, clean_exp).ratio() * 100
+
+    exp_keywords = list(dict.fromkeys(extract_keywords(expected_answer)))
+    user_words_set = set(extract_keywords(user_text))
+
+    covered_keywords = [w for w in exp_keywords if w in user_words_set]
+    missed_keywords = [w for w in exp_keywords if w not in user_words_set]
+
+    if exp_keywords:
+        kw_ratio = (len(covered_keywords) / len(exp_keywords)) * 100
+        # Accuracy is 65% based on Key Points and 35% on Sentence Formation
+        accuracy_score = (kw_ratio * 0.65) + (seq_ratio * 0.35)
+    else:
+        accuracy_score = seq_ratio
+
+    accuracy_score = min(100.0, max(0.0, accuracy_score))
+
+    # 3. Pronunciation & Clarity Score
+    if google_confidence is not None and google_confidence > 0:
+        pronun_score = min(100.0, google_confidence * 100)
+    else:
+        # Fallback estimation if acoustic confidence not returned
+        pronun_score = min(95.0, max(60.0, 70.0 + (accuracy_score * 0.25)))
+
+    if pronun_score >= 85:
+        pronun_remark = "🌟 Clear & Natural Accent (Spasht Aawaz)"
+    elif pronun_score >= 70:
+        pronun_remark = "👍 Good, thoda aur clarity laane ki koshish karein"
+    else:
+        pronun_remark = "⚠️ Words ko thoda aur saaf aur khol kar bole"
+
+    # 4. Overall Interview Score
+    overall_score = (accuracy_score * 0.40) + (fluency_score * 0.30) + (pronun_score * 0.30)
+    
+    if overall_score >= 85:
+        grade = "A (Excellent - Visa Ready 🇬🇧)"
+    elif overall_score >= 70:
+        grade = "B (Good - Minor Practice Needed)"
+    elif overall_score >= 55:
+        grade = "C (Average - More Practice Required)"
+    else:
+        grade = "D (Needs Improvement)"
+
+    return {
+        "overall": overall_score,
+        "grade": grade,
+        "accuracy": accuracy_score,
+        "fluency": fluency_score,
+        "fluency_remark": fluency_remark,
+        "pronun": pronun_score,
+        "pronun_remark": pronun_remark,
+        "wpm": wpm,
+        "duration": duration_sec,
+        "covered": covered_keywords,
+        "missed": missed_keywords,
+        "total_kw": len(exp_keywords)
+    }
+
+# ==================== 5. BOT HANDLERS ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["q_index"] = 0
     reload_questions()
@@ -243,8 +342,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🇬🇧 UK Visa Interview Practice Bot me aapka swagat hai!\n\n"
         f"📊 Total Questions: {len(QUESTIONS)}\n"
         "🔹 Sawal aane par apna answer Voice Note (bolkar) bhejein.\n"
-        "🔹 Nayi file lagane ke liye sirf .txt file send kar dein.\n"
-        "🔹 Sabhi sawal hatane ke liye /delete dabayein.\n\n"
+        "🔹 Bot aapko Accuracy, Fluency, Pronunciation aur WPM ka scorecard dega.\n"
+        "🔹 Nayi file lagane ke liye sirf .txt file send kar dein.\n\n"
         "Pehla sawal niche dekhein 👇"
     )
     await ask_question(update, context)
@@ -272,14 +371,11 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_msg = await update.message.reply_text("⏳ Questions delete kiye ja rahe hain...")
     success, msg = delete_file_from_github()
 
-    # Memory aur Local File ko hamesha clean karein
     QUESTIONS = []
     context.user_data["q_index"] = 0
     if os.path.exists("questions.txt"):
-        try:
-            os.remove("questions.txt")
-        except Exception:
-            pass
+        try: os.remove("questions.txt")
+        except: pass
 
     if success:
         await status_msg.edit_text("🗑️ Sabhi Questions Delete ho gaye! Ab bot bilkul khali hai.")
@@ -359,7 +455,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Koi active question nahi hai. Naye sawal daalne ke liye .txt file bhejein ya /start dabayein.")
         return
 
-    status_msg = await update.message.reply_text("⏳ Processing audio...")
+    status_msg = await update.message.reply_text("⏳ Processing speech & evaluating metrics...")
 
     voice_file = await update.message.voice.get_file()
     user_id = update.message.from_user.id
@@ -367,43 +463,74 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     wav_path = f"temp_{user_id}.wav"
     await voice_file.download_to_drive(oga_path)
 
+    audio_duration = 0.0
     try:
         audio = AudioSegment.from_file(oga_path)
+        audio_duration = len(audio) / 1000.0  # seconds me
         audio.export(wav_path, format="wav")
     except Exception as e:
         await status_msg.edit_text(f"❌ Audio convert error: {str(e)}")
         if os.path.exists(oga_path): os.remove(oga_path)
         return
 
+    user_text = ""
+    google_confidence = None
+
     try:
         with sr.AudioFile(wav_path) as source:
             audio_data = recognizer.record(source)
-            user_text = recognizer.recognize_google(audio_data, language="en-GB")
+            # show_all=True se acoustic confidence milti hai pronunciation ke liye
+            result = recognizer.recognize_google(audio_data, language="en-GB", show_all=True)
+            
+            if not result or not isinstance(result, dict) or not result.get("alternative"):
+                raise sr.UnknownValueError()
+            
+            best_match = result["alternative"][0]
+            user_text = best_match.get("transcript", "").strip()
+            google_confidence = best_match.get("confidence", None)
+
     except sr.UnknownValueError:
-        await status_msg.edit_text("❌ Aapki aawaz saaf nahi aayi. Kripya dubara bolkar bhejein.")
+        await status_msg.edit_text("❌ Aapki aawaz saaf nahi aayi. Kripya shanti wali jagah se dubara bolkar bhejein.")
         if os.path.exists(oga_path): os.remove(oga_path)
         if os.path.exists(wav_path): os.remove(wav_path)
         return
     except Exception as e:
-        await status_msg.edit_text(f"❌ Error: {str(e)}")
+        await status_msg.edit_text(f"❌ Speech Error: {str(e)}")
         if os.path.exists(oga_path): os.remove(oga_path)
         if os.path.exists(wav_path): os.remove(wav_path)
         return
 
+    # Temporary files clean karein
     if os.path.exists(oga_path): os.remove(oga_path)
     if os.path.exists(wav_path): os.remove(wav_path)
 
     expected_answer = QUESTIONS[idx]["answer"]
-    clean_user = " ".join(user_text.lower().split())
-    clean_exp = " ".join(expected_answer.lower().split())
-    similarity = difflib.SequenceMatcher(None, clean_user, clean_exp).ratio() * 100
+
+    # Advanced Evaluation Metrics Calculate karein
+    report = evaluate_speech(user_text, expected_answer, audio_duration, google_confidence)
+
+    # Keywords string banayein
+    covered_str = ", ".join(report["covered"][:6]) if report["covered"] else "None"
+    missed_str = ", ".join(report["missed"][:6]) if report["missed"] else "None (Sabhi bole 🎉)"
 
     feedback = (
-        f"🗣️ Aapne bola:\n\"{user_text}\"\n\n"
-        f"✅ Expected Answer:\n\"{expected_answer}\"\n\n"
-        f"📊 Accuracy Score: {similarity:.1f}%"
+        f"🗣️ *Aapne bola:*\n\"{user_text}\"\n\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🏆 *OVERALL SCORE: {report['overall']:.1f}%*\n"
+        f"🎖️ *Grade:* {report['grade']}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🎯 *Accuracy (Content):* {report['accuracy']:.1f}%\n"
+        f"🗣️ *Pronunciation:* {report['pronun']:.1f}% ({report['pronun_remark']})\n"
+        f"⚡ *Fluency:* {report['fluency']:.1f}% ({report['wpm']} WPM)\n"
+        f"⏱️ *Duration:* {report['duration']:.1f}s | {report['fluency_remark']}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"📌 *Key Points Analysis ({len(report['covered'])}/{report['total_kw']}):*\n"
+        f"✅ *Covered:* `{covered_str}`\n"
+        f"❌ *Missed:* `{missed_str}`\n\n"
+        f"📖 *Expected Answer:*\n\"{expected_answer}\""
     )
-    await status_msg.edit_text(feedback)
+    
+    await status_msg.edit_text(feedback, parse_mode="Markdown")
 
     context.user_data["q_index"] = idx + 1
     await ask_question(update, context)
