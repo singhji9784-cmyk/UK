@@ -93,7 +93,7 @@ def auto_keep_alive_ping():
         else:
             print("[Keep-Alive Alert] 'RENDER_EXTERNAL_URL' set nahi hai! Render dashboard me dalein.")
         
-        # Har 150 seconds (2.5 minute) me ping hoga taaki Render 15 min me sleep na ho sake
+        # Har 150 seconds (2.5 minute) me ping repeat hoga
         time.sleep(150)
 
 # ==================== 2. GITHUB ASYNC BACKUP ====================
@@ -131,13 +131,12 @@ def serialize_questions(qa_list):
     return "\n---\n".join(entries)
 
 def background_sync_github():
-    """Heavy GitHub upload background me chalta hai taaki bot user ke liye turant reply de"""
+    """Background thread me GitHub par questions.txt update hota rahega"""
     if not GITHUB_TOKEN:
         return
     try:
         content_text = serialize_questions(QUESTIONS)
         if not QUESTIONS:
-            # File empty hai to GitHub se delete kar do
             _, sha = get_github_file()
             if sha:
                 url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_FILE_PATH}"
@@ -173,12 +172,15 @@ def parse_questions_content(content):
         entry = entry.strip()
         if not entry:
             continue
-        if "Q:" in entry and "A:" in entry:
-            parts = entry.split("A:", 1)
-            q_part = parts[0].replace("Q:", "", 1).strip()
-            a_part = parts[1].strip()
-            if q_part and a_part:
-                qa_list.append({"question": q_part, "answer": a_part})
+        # Support Q: and A:
+        if ("Q:" in entry or "q:" in entry) and ("A:" in entry or "a:" in entry):
+            # Split case-insensitively on A: or a:
+            parts = re.split(r'\n?[Aa]:\s*', entry, maxsplit=1)
+            if len(parts) == 2:
+                q_part = re.sub(r'^[Qq]:\s*', '', parts[0].strip()).strip()
+                a_part = parts[1].strip()
+                if q_part and a_part:
+                    qa_list.append({"question": q_part, "answer": a_part})
     return qa_list
 
 def reload_questions():
@@ -235,7 +237,7 @@ def evaluate_speech(user_text, expected_answer, audio_duration_sec, google_confi
         fluency_remark = "⚡ Thoda fast tha, aaram se bole"
     elif wpm < 90:
         fluency_score = max(35.0, 45.0 + (wpm / 90.0) * 25.0)
-        fluency_remark = "⚠️ Ruk-ruk ke bola, bina ruke flow me bole"
+        fluency_remark = "⚠️ Ruk-ruk ke bola, flow me bole"
     else:
         fluency_score = max(40.0, 70.0 - ((wpm - 185) / 50.0) * 25.0)
         fluency_remark = "⚠️ Jyada tezi se bola, shanti se bole"
@@ -268,7 +270,7 @@ def evaluate_speech(user_text, expected_answer, audio_duration_sec, google_confi
     elif pronun_score >= 70:
         pronun_remark = "👍 Good Clarity"
     else:
-        pronun_remark = "⚠️ Words thode spasht bole"
+        pronun_remark = "⚠️ Words spasht bole"
 
     overall_score = (accuracy_score * 0.40) + (fluency_score * 0.30) + (pronun_score * 0.30)
     
@@ -296,7 +298,7 @@ def evaluate_speech(user_text, expected_answer, audio_duration_sec, google_confi
         "total_kw": len(exp_keywords)
     }
 
-# ==================== 5. KEYBOARD BUILDER ====================
+# ==================== 5. KEYBOARDS ====================
 def build_question_keyboard():
     keyboard = [
         [
@@ -309,13 +311,41 @@ def build_question_keyboard():
     ]
     return InlineKeyboardMarkup(keyboard)
 
-# ==================== 6. BOT HANDLERS ====================
+# ==================== 6. BOT LOGIC (APPEND MODE) ====================
+def add_new_questions_to_pool(parsed_items):
+    """Purane questions ko mitaye bina naye questions ko append karta hai"""
+    global QUESTIONS
+    added_count = 0
+    updated_count = 0
+
+    for item in parsed_items:
+        q_clean = item["question"].strip().lower()
+        matched = False
+        for existing in QUESTIONS:
+            if existing["question"].strip().lower() == q_clean:
+                existing["answer"] = item["answer"]
+                matched = True
+                updated_count += 1
+                break
+        if not matched:
+            QUESTIONS.append(item)
+            added_count += 1
+
+    # Local file me pura merged list save karein
+    with open("questions.txt", "w", encoding="utf-8") as f:
+        f.write(serialize_questions(QUESTIONS))
+
+    # GitHub par background me sync trigger karein
+    trigger_background_sync()
+
+    return added_count, updated_count
+
 async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not QUESTIONS:
         await context.bot.send_message(
             chat_id=chat_id, 
-            text="⚠️ Abhi koi questions nahi hain. Nayi `.txt` file bhejein!"
+            text="⚠️ Abhi koi questions nahi hain. Nayi `.txt` file bhejein ya `Q:` aur `A:` likhkar send karein!"
         )
         return
 
@@ -347,29 +377,28 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "🇬🇧 UK Visa Interview Bot me swagat hai!\n\n"
             "⚠️ Abhi koi questions upload nahi hain.\n"
-            "👉 Questions wali `.txt` file send karein."
+            "👉 Questions wali `.txt` file send karein ya seedha `Q:` aur `A:` likhkar message karein."
         )
         return
 
     await update.message.reply_text(
         f"🇬🇧 UK Visa Interview Practice Bot Started!\n"
-        f"📊 Kul Questions: {len(QUESTIONS)}\n"
+        f"📊 Kul Questions: *{len(QUESTIONS)}*\n"
         f"🔹 Answer bolne ke liye Voice Note bhejein.\n"
         f"🔹 Aage badhne ke liye 'Next' button dabayein."
     )
     await ask_question(update, context)
 
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Button click hone par bina kisi delay ke instant handle karega"""
     query = update.callback_query
-    await query.answer()  # Loading indicator instant band hoga
+    await query.answer()
 
     action = query.data
     idx = context.user_data.get("q_index", 0)
 
     if action == "btn_next":
         if not QUESTIONS:
-            await query.edit_message_text("⚠️ Questions khali hain! Nayi .txt file bhejein.")
+            await query.edit_message_text("⚠️ Questions khali hain! Naye sawal upload karein.")
             return
         context.user_data["q_index"] = (idx + 1) % len(QUESTIONS)
         await ask_question(update, context)
@@ -379,7 +408,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
     elif action == "btn_delete_this":
         if not is_admin(update.effective_user.id):
-            await query.message.reply_text("❌ Aapko question delete karne ki permission nahi hai!")
+            await query.message.reply_text("❌ Question delete karne ki permission nahi hai!")
             return
 
         if not QUESTIONS or idx >= len(QUESTIONS):
@@ -387,6 +416,9 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             return
 
         deleted_q = QUESTIONS.pop(idx)
+        # Update local file & GitHub
+        with open("questions.txt", "w", encoding="utf-8") as f:
+            f.write(serialize_questions(QUESTIONS))
         trigger_background_sync()
 
         await query.edit_message_text(f"🗑️ *Deleted:* \"{deleted_q['question']}\"", parse_mode="Markdown")
@@ -401,16 +433,16 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global QUESTIONS
     if not is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Aapko questions delete karne ki permission nahi hai!")
+        await update.message.reply_text("❌ Permission nahi hai!")
         return
 
     args = context.args
     if not args:
         await update.message.reply_text(
-            "📌 *Specific Question Delete Karne Ke Tarike:*\n\n"
-            "1️⃣ Number se: `/delete 2` (Sawal number 2 delete hoga)\n"
-            "2️⃣ Title/Word se: `/delete why uk` (Jisme 'why uk' hoga wo delete hoga)\n"
-            "3️⃣ Sab delete karne ke liye: `/delete all`",
+            "📌 *Question Delete Karne Ke Tarike:*\n\n"
+            "1️⃣ Number se: `/delete 2`\n"
+            "2️⃣ Title/Word se: `/delete why uk`\n"
+            "3️⃣ Sabhi sawal delete karne ke liye: `/delete all`",
             parse_mode="Markdown"
         )
         return
@@ -420,27 +452,26 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query_str == "all":
         QUESTIONS = []
         context.user_data["q_index"] = 0
+        with open("questions.txt", "w", encoding="utf-8") as f:
+            f.write("")
         trigger_background_sync()
-        if os.path.exists("questions.txt"):
-            try: os.remove("questions.txt")
-            except: pass
         await update.message.reply_text("🗑️ Sabhi questions successfully delete ho gaye!")
         return
 
-    # Check if number diya hai
     if query_str.isdigit():
         target_num = int(query_str)
         if 1 <= target_num <= len(QUESTIONS):
             deleted = QUESTIONS.pop(target_num - 1)
+            with open("questions.txt", "w", encoding="utf-8") as f:
+                f.write(serialize_questions(QUESTIONS))
             trigger_background_sync()
             context.user_data["q_index"] = min(context.user_data.get("q_index", 0), max(0, len(QUESTIONS) - 1))
             await update.message.reply_text(f"✅ Question {target_num} Deleted:\n👉 *{deleted['question']}*", parse_mode="Markdown")
             return
         else:
-            await update.message.reply_text(f"❌ Invalid number! Sirf 1 se {len(QUESTIONS)} ke beech number dalein.")
+            await update.message.reply_text(f"❌ Invalid number! 1 se {len(QUESTIONS)} ke beech number dalein.")
             return
 
-    # Text search se delete
     matched_idx = -1
     for i, q in enumerate(QUESTIONS):
         if query_str in q["question"].lower():
@@ -449,15 +480,16 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if matched_idx != -1:
         deleted = QUESTIONS.pop(matched_idx)
+        with open("questions.txt", "w", encoding="utf-8") as f:
+            f.write(serialize_questions(QUESTIONS))
         trigger_background_sync()
         context.user_data["q_index"] = min(context.user_data.get("q_index", 0), max(0, len(QUESTIONS) - 1))
-        await update.message.reply_text(f"✅ Question Match Ho Gaya Aur Delete Hua:\n👉 *{deleted['question']}*", parse_mode="Markdown")
+        await update.message.reply_text(f"✅ Question Deleted:\n👉 *{deleted['question']}*", parse_mode="Markdown")
     else:
         await update.message.reply_text(f"❌ \"{query_str}\" se related koi sawal nahi mila.")
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """File upload hote hi microsecond me load karega, backup background me chalega"""
-    global QUESTIONS
+    """File upload hone par purane questions ke sath NAYA QUESTION APPEND HOGA"""
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("❌ Permission denied!")
         return
@@ -478,35 +510,62 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parsed = parse_questions_content(content_text)
     if not parsed:
         await update.message.reply_text(
-            "❌ Format Galat Hai! File me `Q:` aur `A:` format hona chahiye.\n\n"
+            "❌ Format Galat Hai! File me `Q:` aur `A:` hona chahiye.\n\n"
             "Example:\n"
             "Q: Why UK?\n"
-            "A: Because...\n"
-            "---"
+            "A: Because..."
         )
         return
 
-    # Instant memory me load karo (Zero latency)
-    QUESTIONS = parsed
-    context.user_data["q_index"] = 0
+    added, updated = add_new_questions_to_pool(parsed)
 
-    # Local file save
-    with open("questions.txt", "w", encoding="utf-8") as f:
-        f.write(content_text)
-
-    # Heavy GitHub upload background me fire kar do
-    trigger_background_sync()
-
-    await update.message.reply_text(
-        f"⚡ *Instantly Loaded!*\n\n"
-        f"📊 Total Questions: {len(QUESTIONS)}\n"
-        f"Interview shuru karne ke liye niche sawal dekhein 👇",
-        parse_mode="Markdown"
+    msg = (
+        f"✅ *Questions Successfully Added!* 🚀\n\n"
+        f"➕ Naye Questions Jude: *+{added}*\n"
     )
+    if updated > 0:
+        msg += f"🔄 Updated (Already Existed): *{updated}*\n"
+    msg += f"📊 Ab Bot Me Kul Questions: *{len(QUESTIONS)}*\n\nNiche practice karein 👇"
+
+    await update.message.reply_text(msg, parse_mode="Markdown")
+    
+    # Naye sawal par le jayein
+    context.user_data["q_index"] = len(QUESTIONS) - 1
     await ask_question(update, context)
 
+async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Agar user seedha chat me 'Q: ... A: ...' type karke bheje toh bina file ke add kar lega"""
+    text = update.message.text.strip()
+    
+    # Check if text contains Q: and A:
+    if ("q:" in text.lower()) and ("a:" in text.lower()):
+        if not is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Permission denied!")
+            return
+        
+        parsed = parse_questions_content(text)
+        if parsed:
+            added, updated = add_new_questions_to_pool(parsed)
+            msg = (
+                f"⚡ *Quick Question Added via Text!*\n\n"
+                f"➕ Naye Questions: *+{added}*\n"
+                f"📊 Ab Kul Questions: *{len(QUESTIONS)}*\n\n"
+                f"Niche practice karein 👇"
+            )
+            await update.message.reply_text(msg, parse_mode="Markdown")
+            context.user_data["q_index"] = len(QUESTIONS) - 1
+            await ask_question(update, context)
+            return
+
+    # Normal text ho toh user ko guide karein
+    await update.message.reply_text(
+        "🎙️ Sawal ka jawab dene ke liye **Voice Note (Aawaz)** bhejein.\n"
+        "👉 Naya question jodne ke liye `.txt` file bhejein ya format me likhein:\n"
+        "`Q: Your Question`\n`A: Your Answer`",
+        parse_mode="Markdown"
+    )
+
 def convert_and_transcribe(oga_path, wav_path):
-    """Heavy Audio processing thread pool me run hoga taaki main bot fast rahe"""
     audio = AudioSegment.from_file(oga_path)
     duration_sec = len(audio) / 1000.0
     audio.export(wav_path, format="wav")
@@ -525,7 +584,7 @@ def convert_and_transcribe(oga_path, wav_path):
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     idx = context.user_data.get("q_index", 0)
     if not QUESTIONS or idx >= len(QUESTIONS):
-        await update.message.reply_text("⚠️ Pehle /start dabayein ya questions file upload karein.")
+        await update.message.reply_text("⚠️ Pehle sawal upload karein ya /start dabayein.")
         return
 
     status_msg = await update.message.reply_text("⏳ Evaluating speech metrics...")
@@ -537,7 +596,6 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     voice_file = await update.message.voice.get_file()
     await voice_file.download_to_drive(oga_path)
 
-    # Event loop ko block kiye bina thread me convert aur transcribe karein
     loop = asyncio.get_running_loop()
     try:
         user_text, google_conf, audio_duration = await loop.run_in_executor(
@@ -578,7 +636,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await status_msg.edit_text(feedback, parse_mode="Markdown")
 
-    # Automatic Next Question Button sath me bhejo
+    # Automatically Next question par le jayein
     context.user_data["q_index"] = (idx + 1) % len(QUESTIONS)
     await ask_question(update, context)
 
@@ -592,7 +650,7 @@ def main():
     ping_thread = threading.Thread(target=auto_keep_alive_ping, daemon=True)
     ping_thread.start()
 
-    # 3. Load Questions into RAM
+    # 3. Load Existing Questions
     reload_questions()
 
     # 4. Telegram Application
@@ -601,14 +659,15 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("delete", delete_command))
     
-    # Inline Buttons Handler (Next / Repeat / Delete)
+    # Inline Buttons
     app.add_handler(CallbackQueryHandler(button_callback_handler))
 
-    # File & Voice Handlers
+    # Handlers (Files, Text for quick Q/A add, and Voice)
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 
-    print("[Ready] High-Performance UK Visa Bot Started!")
+    print("[Ready] Bot is active with 1-by-1 Append Mode!")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
