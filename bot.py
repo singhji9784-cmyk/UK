@@ -21,7 +21,7 @@ import speech_recognition as sr
 from pydub import AudioSegment
 import imageio_ffmpeg
 
-# Logging setup taaki Render console me har activity aur error saaf dikhe
+# Logging setup taaki Render console me har activity saaf dikhe
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", 
     level=logging.INFO
@@ -98,7 +98,6 @@ def auto_keep_alive_ping():
         else:
             logger.warning("[Keep-Alive Alert] 'RENDER_EXTERNAL_URL' set nahi hai!")
         
-        # Har 2 minute (120s) me ping karega
         time.sleep(120)
 
 # ==================== 2. GITHUB ASYNC BACKUP ====================
@@ -292,15 +291,17 @@ def evaluate_speech(user_text, expected_answer, audio_duration_sec, google_confi
         "total_kw": len(exp_keywords)
     }
 
-# ==================== 5. KEYBOARDS ====================
-def build_question_keyboard():
+# ==================== 5. KEYBOARDS (WITH BACK & ACCURATE REPEAT) ====================
+def build_question_keyboard(curr_idx):
+    """Har button ke sath uska exact index link hota hai taaki repeat wahi sawal kare"""
     keyboard = [
         [
-            InlineKeyboardButton("⏭️ Next Question", callback_data="btn_next"),
-            InlineKeyboardButton("🔄 Repeat", callback_data="btn_repeat")
+            InlineKeyboardButton("⬅️ Back", callback_data=f"btn_prev:{curr_idx}"),
+            InlineKeyboardButton("🔄 Repeat", callback_data=f"btn_repeat:{curr_idx}"),
+            InlineKeyboardButton("⏭️ Next", callback_data=f"btn_next:{curr_idx}")
         ],
         [
-            InlineKeyboardButton("🗑️ Delete This Question", callback_data="btn_delete_this")
+            InlineKeyboardButton("🗑️ Delete This Question", callback_data=f"btn_delete:{curr_idx}")
         ]
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -348,14 +349,14 @@ async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         f"🎙️ *Question {idx + 1}/{len(QUESTIONS)}:*\n\n"
         f"👉 *{q_text}*\n\n"
-        f"_(Voice Note me answer bole ya button dabayein)_"
+        f"_(Voice Note me answer bole ya buttons use karein)_"
     )
 
     await context.bot.send_message(
         chat_id=chat_id,
         text=msg,
         parse_mode="Markdown",
-        reply_markup=build_question_keyboard()
+        reply_markup=build_question_keyboard(idx)
     )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -375,7 +376,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🇬🇧 UK Visa Interview Practice Bot Active!\n"
         f"📊 Total Questions: *{len(QUESTIONS)}*\n"
         f"🔹 Answer bolne ke liye Voice Note bhejein.\n"
-        f"🔹 Aage badhne ke liye 'Next Question' dabayein.",
+        f"🔹 Sawalo ko navigate karne ke liye niche buttons use karein.",
         parse_mode="Markdown"
     )
     await ask_question(update, context)
@@ -384,29 +385,51 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     query = update.callback_query
     await query.answer()
 
-    action = query.data
-    idx = context.user_data.get("q_index", 0)
+    data = query.data
+    if not QUESTIONS:
+        await query.edit_message_text("⚠️ Questions khali hain!")
+        return
+
+    # Index extract karein taaki sahi question repeat / back / next ho
+    if ":" in data:
+        action, idx_str = data.split(":", 1)
+        try:
+            curr_idx = int(idx_str)
+        except ValueError:
+            curr_idx = context.user_data.get("q_index", 0)
+    else:
+        action = data
+        curr_idx = context.user_data.get("q_index", 0)
+
+    total_q = len(QUESTIONS)
+    curr_idx = max(0, min(curr_idx, total_q - 1))
 
     if action == "btn_next":
-        if not QUESTIONS:
-            await query.edit_message_text("⚠️ Questions khali hain!")
-            return
-        context.user_data["q_index"] = (idx + 1) % len(QUESTIONS)
+        next_idx = (curr_idx + 1) % total_q
+        context.user_data["q_index"] = next_idx
+        await ask_question(update, context)
+
+    elif action == "btn_prev":
+        # Pichhle question par le jayein
+        prev_idx = (curr_idx - 1 + total_q) % total_q
+        context.user_data["q_index"] = prev_idx
         await ask_question(update, context)
 
     elif action == "btn_repeat":
+        # Wahi question dobara layein (Ekdum accurate!)
+        context.user_data["q_index"] = curr_idx
         await ask_question(update, context)
 
-    elif action == "btn_delete_this":
+    elif action == "btn_delete":
         if not is_admin(update.effective_user.id):
             await query.message.reply_text("❌ Permission denied!")
             return
 
-        if not QUESTIONS or idx >= len(QUESTIONS):
-            await query.edit_message_text("⚠️ Koi question nahi mila.")
+        if curr_idx >= len(QUESTIONS):
+            await query.edit_message_text("⚠️ Question pehle hi delete ho chuka hai.")
             return
 
-        deleted_q = QUESTIONS.pop(idx)
+        deleted_q = QUESTIONS.pop(curr_idx)
         with open("questions.txt", "w", encoding="utf-8") as f:
             f.write(serialize_questions(QUESTIONS))
         trigger_background_sync()
@@ -414,8 +437,8 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text(f"🗑️ *Deleted:* \"{deleted_q['question']}\"", parse_mode="Markdown")
 
         if QUESTIONS:
-            if idx >= len(QUESTIONS):
-                context.user_data["q_index"] = 0
+            new_idx = min(curr_idx, len(QUESTIONS) - 1)
+            context.user_data["q_index"] = new_idx
             await ask_question(update, context)
         else:
             await query.message.reply_text("Sabhi questions delete ho gaye!")
@@ -525,7 +548,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
 
     await update.message.reply_text(
-        "🎙️ Answer dene ke liye Voice Note bhejein ya 'Next Question' button dabayein."
+        "🎙️ Answer dene ke liye Voice Note bhejein ya buttons use karein."
     )
 
 def convert_and_transcribe(oga_path, wav_path):
@@ -600,7 +623,6 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["q_index"] = (idx + 1) % len(QUESTIONS)
     await ask_question(update, context)
 
-# Global Error Handler: Agar koi network drop ya conflict ho toh bot crash na ho
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error(f"[Bot Error Caught] {context.error}")
 
@@ -617,12 +639,11 @@ def main():
     # 3. Load Existing Questions
     reload_questions()
 
-    # 4. Telegram Application with CONCURRENT UPDATES & TIMEOUTS
-    # Ye setting bot ko kisi bhi halat me freeze ya hang hone se rokti hai
+    # 4. Telegram Application with CONCURRENT UPDATES
     app = (
         ApplicationBuilder()
         .token(BOT_TOKEN)
-        .concurrent_updates(True)  # Har message parallel chalega, kabhi queue me nahi atusega
+        .concurrent_updates(True)
         .read_timeout(30)
         .write_timeout(30)
         .connect_timeout(30)
@@ -632,7 +653,6 @@ def main():
 
     app.add_error_handler(error_handler)
 
-    # Commands (Supports both /start and /Start)
     app.add_handler(CommandHandler(["start", "Start"], start))
     app.add_handler(CommandHandler(["delete", "Delete"], delete_command))
     
@@ -641,7 +661,7 @@ def main():
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 
-    logger.info("[Ready] Bot is running with Concurrent Non-Blocking Engine!")
+    logger.info("[Ready] Bot is running with Back, Next & Repeat Buttons!")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
