@@ -5,6 +5,7 @@ import time
 import threading
 import asyncio
 import base64
+import logging
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -20,13 +21,18 @@ import speech_recognition as sr
 from pydub import AudioSegment
 import imageio_ffmpeg
 
+# Logging setup taaki Render console me har activity aur error saaf dikhe
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", 
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
 # Set ffmpeg path for pydub
 AudioSegment.converter = imageio_ffmpeg.get_ffmpeg_exe()
 
 # ==================== CONFIGURATIONS ====================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-
-# Render Live URL (e.g., https://your-app-name.onrender.com)
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "").strip()
 
 # GitHub Configurations
@@ -35,9 +41,7 @@ GITHUB_REPO = os.getenv("GITHUB_REPO", "singhji9784-cmyk/UK").strip()
 GITHUB_FILE_PATH = os.getenv("GITHUB_FILE_PATH", "questions.txt").strip()
 GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main").strip()
 
-# Admin check (khali chhodne par sab use kar sakte hain)
 ADMIN_ID = os.getenv("ADMIN_ID", "").strip()
-
 QUESTIONS = []
 
 STOPWORDS = {
@@ -54,13 +58,13 @@ STOPWORDS = {
     "with", "would", "you", "your", "yours", "yourself", "yourselves"
 }
 
-# ==================== 1. KEEP-ALIVE SERVER & SELF-PING ====================
+# ==================== 1. KEEP-ALIVE HTTP SERVER ====================
 class PingServerHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
-        self.wfile.write(b"OK - UK Visa Bot is Online 24/7!")
+        self.wfile.write(b"OK - UK Visa Bot is 100% Active and Online!")
 
     def do_HEAD(self):
         self.send_response(200)
@@ -72,12 +76,14 @@ class PingServerHandler(BaseHTTPRequestHandler):
 def run_web_server():
     port = int(os.getenv("PORT", 8080))
     server = HTTPServer(("0.0.0.0", port), PingServerHandler)
-    print(f"[Keep-Alive] Server listening on port {port}")
+    logger.info(f"[Server] Health-Check HTTP server running on port {port}")
     server.serve_forever()
 
 def auto_keep_alive_ping():
-    time.sleep(15)
-    headers = {"User-Agent": "Mozilla/5.0 KeepAlivePing/3.0"}
+    time.sleep(20)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0"
+    }
     
     while True:
         target_url = RENDER_EXTERNAL_URL
@@ -85,16 +91,15 @@ def auto_keep_alive_ping():
             if not target_url.startswith("http://") and not target_url.startswith("https://"):
                 target_url = f"https://{target_url}"
             try:
-                res = requests.get(target_url, headers=headers, timeout=12)
-                t_str = time.strftime("%H:%M:%S")
-                print(f"[{t_str}] [Keep-Alive Ping] -> Status: {res.status_code}")
+                res = requests.get(target_url, headers=headers, timeout=15)
+                logger.info(f"[Keep-Alive] Ping to {target_url} -> Status: {res.status_code}")
             except Exception as e:
-                print(f"[Keep-Alive Warning] Ping error: {e}")
+                logger.warning(f"[Keep-Alive] Ping error: {e}")
         else:
-            print("[Keep-Alive Alert] 'RENDER_EXTERNAL_URL' set nahi hai! Render dashboard me dalein.")
+            logger.warning("[Keep-Alive Alert] 'RENDER_EXTERNAL_URL' set nahi hai!")
         
-        # Har 150 seconds (2.5 minute) me ping repeat hoga
-        time.sleep(150)
+        # Har 2 minute (120s) me ping karega
+        time.sleep(120)
 
 # ==================== 2. GITHUB ASYNC BACKUP ====================
 def get_github_headers():
@@ -121,7 +126,7 @@ def get_github_file():
         elif res.status_code == 404:
             return False, None
     except Exception as e:
-        print(f"GitHub fetch error: {e}")
+        logger.error(f"GitHub fetch error: {e}")
     return None, None
 
 def serialize_questions(qa_list):
@@ -131,7 +136,6 @@ def serialize_questions(qa_list):
     return "\n---\n".join(entries)
 
 def background_sync_github():
-    """Background thread me GitHub par questions.txt update hota rahega"""
     if not GITHUB_TOKEN:
         return
     try:
@@ -155,9 +159,9 @@ def background_sync_github():
         if sha:
             payload["sha"] = sha
         requests.put(url, headers=get_github_headers(), json=payload, timeout=12)
-        print("[GitHub Sync] Background backup completed successfully.")
+        logger.info("[GitHub Sync] Background backup completed.")
     except Exception as e:
-        print(f"[GitHub Sync Error] {e}")
+        logger.error(f"[GitHub Sync Error] {e}")
 
 def trigger_background_sync():
     threading.Thread(target=background_sync_github, daemon=True).start()
@@ -172,9 +176,7 @@ def parse_questions_content(content):
         entry = entry.strip()
         if not entry:
             continue
-        # Support Q: and A:
         if ("Q:" in entry or "q:" in entry) and ("A:" in entry or "a:" in entry):
-            # Split case-insensitively on A: or a:
             parts = re.split(r'\n?[Aa]:\s*', entry, maxsplit=1)
             if len(parts) == 2:
                 q_part = re.sub(r'^[Qq]:\s*', '', parts[0].strip()).strip()
@@ -203,10 +205,10 @@ def reload_questions():
             if QUESTIONS:
                 return True, f"Local memory se {len(QUESTIONS)} questions load ho gaye!"
         except Exception as e:
-            print(f"File read error: {e}")
+            logger.error(f"File read error: {e}")
 
     QUESTIONS = []
-    return False, "Abhi 0 questions hain. Nayi .txt file bhejein!"
+    return False, "Abhi 0 questions hain."
 
 recognizer = sr.Recognizer()
 
@@ -228,19 +230,19 @@ def evaluate_speech(user_text, expected_answer, audio_duration_sec, google_confi
 
     if 115 <= wpm <= 155:
         fluency_score = min(100.0, 92.0 + (8.0 * (1 - abs(135 - wpm) / 20.0)))
-        fluency_remark = "🎯 Perfect Speaking Pace"
+        fluency_remark = "🎯 Perfect Pace"
     elif 90 <= wpm < 115:
         fluency_score = 75.0 + ((wpm - 90) / 25.0) * 15.0
-        fluency_remark = "🐢 Thoda slow tha, flow badhayein"
+        fluency_remark = "🐢 Thoda slow tha"
     elif 155 < wpm <= 185:
         fluency_score = 75.0 + ((185 - wpm) / 30.0) * 15.0
-        fluency_remark = "⚡ Thoda fast tha, aaram se bole"
+        fluency_remark = "⚡ Thoda fast tha"
     elif wpm < 90:
         fluency_score = max(35.0, 45.0 + (wpm / 90.0) * 25.0)
-        fluency_remark = "⚠️ Ruk-ruk ke bola, flow me bole"
+        fluency_remark = "⚠️ Ruk-ruk ke bola"
     else:
         fluency_score = max(40.0, 70.0 - ((wpm - 185) / 50.0) * 25.0)
-        fluency_remark = "⚠️ Jyada tezi se bola, shanti se bole"
+        fluency_remark = "⚠️ Jyada tezi se bola"
 
     clean_user = " ".join(user_text.lower().split())
     clean_exp = " ".join(expected_answer.lower().split())
@@ -265,23 +267,16 @@ def evaluate_speech(user_text, expected_answer, audio_duration_sec, google_confi
     else:
         pronun_score = min(95.0, max(60.0, 70.0 + (accuracy_score * 0.25)))
 
-    if pronun_score >= 85:
-        pronun_remark = "🌟 Clear Accent"
-    elif pronun_score >= 70:
-        pronun_remark = "👍 Good Clarity"
-    else:
-        pronun_remark = "⚠️ Words spasht bole"
-
     overall_score = (accuracy_score * 0.40) + (fluency_score * 0.30) + (pronun_score * 0.30)
     
     if overall_score >= 85:
-        grade = "A (Excellent - Visa Ready 🇬🇧)"
+        grade = "A (Excellent 🇬🇧)"
     elif overall_score >= 70:
-        grade = "B (Good - Minor Practice Needed)"
+        grade = "B (Good)"
     elif overall_score >= 55:
-        grade = "C (Average - More Practice Required)"
+        grade = "C (Average)"
     else:
-        grade = "D (Needs Improvement)"
+        grade = "D (Needs Work)"
 
     return {
         "overall": overall_score,
@@ -290,7 +285,6 @@ def evaluate_speech(user_text, expected_answer, audio_duration_sec, google_confi
         "fluency": fluency_score,
         "fluency_remark": fluency_remark,
         "pronun": pronun_score,
-        "pronun_remark": pronun_remark,
         "wpm": wpm,
         "duration": duration_sec,
         "covered": covered_keywords,
@@ -311,9 +305,8 @@ def build_question_keyboard():
     ]
     return InlineKeyboardMarkup(keyboard)
 
-# ==================== 6. BOT LOGIC (APPEND MODE) ====================
+# ==================== 6. BOT ACTIONS ====================
 def add_new_questions_to_pool(parsed_items):
-    """Purane questions ko mitaye bina naye questions ko append karta hai"""
     global QUESTIONS
     added_count = 0
     updated_count = 0
@@ -331,13 +324,10 @@ def add_new_questions_to_pool(parsed_items):
             QUESTIONS.append(item)
             added_count += 1
 
-    # Local file me pura merged list save karein
     with open("questions.txt", "w", encoding="utf-8") as f:
         f.write(serialize_questions(QUESTIONS))
 
-    # GitHub par background me sync trigger karein
     trigger_background_sync()
-
     return added_count, updated_count
 
 async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -358,7 +348,7 @@ async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         f"🎙️ *Question {idx + 1}/{len(QUESTIONS)}:*\n\n"
         f"👉 *{q_text}*\n\n"
-        f"_(Voice Note me answer bole ya button use karein)_"
+        f"_(Voice Note me answer bole ya button dabayein)_"
     )
 
     await context.bot.send_message(
@@ -377,15 +367,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "🇬🇧 UK Visa Interview Bot me swagat hai!\n\n"
             "⚠️ Abhi koi questions upload nahi hain.\n"
-            "👉 Questions wali `.txt` file send karein ya seedha `Q:` aur `A:` likhkar message karein."
+            "👉 Questions wali `.txt` file send karein ya `Q:` aur `A:` likhkar bhejein."
         )
         return
 
     await update.message.reply_text(
-        f"🇬🇧 UK Visa Interview Practice Bot Started!\n"
-        f"📊 Kul Questions: *{len(QUESTIONS)}*\n"
+        f"🇬🇧 UK Visa Interview Practice Bot Active!\n"
+        f"📊 Total Questions: *{len(QUESTIONS)}*\n"
         f"🔹 Answer bolne ke liye Voice Note bhejein.\n"
-        f"🔹 Aage badhne ke liye 'Next' button dabayein."
+        f"🔹 Aage badhne ke liye 'Next Question' dabayein.",
+        parse_mode="Markdown"
     )
     await ask_question(update, context)
 
@@ -398,7 +389,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
     if action == "btn_next":
         if not QUESTIONS:
-            await query.edit_message_text("⚠️ Questions khali hain! Naye sawal upload karein.")
+            await query.edit_message_text("⚠️ Questions khali hain!")
             return
         context.user_data["q_index"] = (idx + 1) % len(QUESTIONS)
         await ask_question(update, context)
@@ -408,15 +399,14 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
     elif action == "btn_delete_this":
         if not is_admin(update.effective_user.id):
-            await query.message.reply_text("❌ Question delete karne ki permission nahi hai!")
+            await query.message.reply_text("❌ Permission denied!")
             return
 
         if not QUESTIONS or idx >= len(QUESTIONS):
-            await query.edit_message_text("⚠️ Koi active question nahi mila.")
+            await query.edit_message_text("⚠️ Koi question nahi mila.")
             return
 
         deleted_q = QUESTIONS.pop(idx)
-        # Update local file & GitHub
         with open("questions.txt", "w", encoding="utf-8") as f:
             f.write(serialize_questions(QUESTIONS))
         trigger_background_sync()
@@ -428,7 +418,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                 context.user_data["q_index"] = 0
             await ask_question(update, context)
         else:
-            await query.message.reply_text("Sabhi questions delete ho gaye! Bot abhi khali hai.")
+            await query.message.reply_text("Sabhi questions delete ho gaye!")
 
 async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global QUESTIONS
@@ -439,10 +429,7 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args:
         await update.message.reply_text(
-            "📌 *Question Delete Karne Ke Tarike:*\n\n"
-            "1️⃣ Number se: `/delete 2`\n"
-            "2️⃣ Title/Word se: `/delete why uk`\n"
-            "3️⃣ Sabhi sawal delete karne ke liye: `/delete all`",
+            "📌 *Delete Format:*\n`/delete 2` ya `/delete why uk` ya `/delete all`",
             parse_mode="Markdown"
         )
         return
@@ -455,7 +442,7 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with open("questions.txt", "w", encoding="utf-8") as f:
             f.write("")
         trigger_background_sync()
-        await update.message.reply_text("🗑️ Sabhi questions successfully delete ho gaye!")
+        await update.message.reply_text("🗑️ Sabhi questions delete ho gaye!")
         return
 
     if query_str.isdigit():
@@ -467,9 +454,6 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             trigger_background_sync()
             context.user_data["q_index"] = min(context.user_data.get("q_index", 0), max(0, len(QUESTIONS) - 1))
             await update.message.reply_text(f"✅ Question {target_num} Deleted:\n👉 *{deleted['question']}*", parse_mode="Markdown")
-            return
-        else:
-            await update.message.reply_text(f"❌ Invalid number! 1 se {len(QUESTIONS)} ke beech number dalein.")
             return
 
     matched_idx = -1
@@ -486,17 +470,16 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["q_index"] = min(context.user_data.get("q_index", 0), max(0, len(QUESTIONS) - 1))
         await update.message.reply_text(f"✅ Question Deleted:\n👉 *{deleted['question']}*", parse_mode="Markdown")
     else:
-        await update.message.reply_text(f"❌ \"{query_str}\" se related koi sawal nahi mila.")
+        await update.message.reply_text(f"❌ \"{query_str}\" match nahi hua.")
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """File upload hone par purane questions ke sath NAYA QUESTION APPEND HOGA"""
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("❌ Permission denied!")
         return
 
     doc = update.message.document
     if not doc.file_name.lower().endswith(".txt"):
-        await update.message.reply_text("⚠️ Kripya sirf `.txt` format wali file bhejein!")
+        await update.message.reply_text("⚠️ Kripya sirf `.txt` file bhejein!")
         return
 
     try:
@@ -509,12 +492,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     parsed = parse_questions_content(content_text)
     if not parsed:
-        await update.message.reply_text(
-            "❌ Format Galat Hai! File me `Q:` aur `A:` hona chahiye.\n\n"
-            "Example:\n"
-            "Q: Why UK?\n"
-            "A: Because..."
-        )
+        await update.message.reply_text("❌ Format galat hai! File me `Q:` aur `A:` hona chahiye.")
         return
 
     added, updated = add_new_questions_to_pool(parsed)
@@ -524,45 +502,30 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"➕ Naye Questions Jude: *+{added}*\n"
     )
     if updated > 0:
-        msg += f"🔄 Updated (Already Existed): *{updated}*\n"
+        msg += f"🔄 Updated: *{updated}*\n"
     msg += f"📊 Ab Bot Me Kul Questions: *{len(QUESTIONS)}*\n\nNiche practice karein 👇"
 
     await update.message.reply_text(msg, parse_mode="Markdown")
-    
-    # Naye sawal par le jayein
     context.user_data["q_index"] = len(QUESTIONS) - 1
     await ask_question(update, context)
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Agar user seedha chat me 'Q: ... A: ...' type karke bheje toh bina file ke add kar lega"""
     text = update.message.text.strip()
-    
-    # Check if text contains Q: and A:
     if ("q:" in text.lower()) and ("a:" in text.lower()):
         if not is_admin(update.effective_user.id):
             await update.message.reply_text("❌ Permission denied!")
             return
-        
         parsed = parse_questions_content(text)
         if parsed:
             added, updated = add_new_questions_to_pool(parsed)
-            msg = (
-                f"⚡ *Quick Question Added via Text!*\n\n"
-                f"➕ Naye Questions: *+{added}*\n"
-                f"📊 Ab Kul Questions: *{len(QUESTIONS)}*\n\n"
-                f"Niche practice karein 👇"
-            )
+            msg = f"⚡ *Question Added!*\n📊 Total: *{len(QUESTIONS)}*"
             await update.message.reply_text(msg, parse_mode="Markdown")
             context.user_data["q_index"] = len(QUESTIONS) - 1
             await ask_question(update, context)
             return
 
-    # Normal text ho toh user ko guide karein
     await update.message.reply_text(
-        "🎙️ Sawal ka jawab dene ke liye **Voice Note (Aawaz)** bhejein.\n"
-        "👉 Naya question jodne ke liye `.txt` file bhejein ya format me likhein:\n"
-        "`Q: Your Question`\n`A: Your Answer`",
-        parse_mode="Markdown"
+        "🎙️ Answer dene ke liye Voice Note bhejein ya 'Next Question' button dabayein."
     )
 
 def convert_and_transcribe(oga_path, wav_path):
@@ -584,7 +547,7 @@ def convert_and_transcribe(oga_path, wav_path):
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     idx = context.user_data.get("q_index", 0)
     if not QUESTIONS or idx >= len(QUESTIONS):
-        await update.message.reply_text("⚠️ Pehle sawal upload karein ya /start dabayein.")
+        await update.message.reply_text("⚠️ Pehle /start dabayein.")
         return
 
     status_msg = await update.message.reply_text("⏳ Evaluating speech metrics...")
@@ -602,7 +565,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             None, convert_and_transcribe, oga_path, wav_path
         )
     except sr.UnknownValueError:
-        await status_msg.edit_text("❌ Aawaz saaf nahi aayi! Shanti wali jagah se dobara bole.")
+        await status_msg.edit_text("❌ Aawaz saaf nahi aayi! Dobara bole.")
         return
     except Exception as e:
         await status_msg.edit_text(f"❌ Audio error: {e}")
@@ -624,9 +587,8 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🎖️ *Grade:* {report['grade']}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"🎯 *Accuracy:* {report['accuracy']:.1f}%\n"
-        f"🗣️ *Pronunciation:* {report['pronun']:.1f}% ({report['pronun_remark']})\n"
         f"⚡ *Fluency:* {report['fluency']:.1f}% ({report['wpm']} WPM)\n"
-        f"⏱️ *Duration:* {report['duration']:.1f}s | {report['fluency_remark']}\n"
+        f"⏱️ *Duration:* {report['duration']:.1f}s\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"📌 *Key Points ({len(report['covered'])}/{report['total_kw']}):*\n"
         f"✅ *Covered:* `{covered_str}`\n"
@@ -635,10 +597,12 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     await status_msg.edit_text(feedback, parse_mode="Markdown")
-
-    # Automatically Next question par le jayein
     context.user_data["q_index"] = (idx + 1) % len(QUESTIONS)
     await ask_question(update, context)
+
+# Global Error Handler: Agar koi network drop ya conflict ho toh bot crash na ho
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.error(f"[Bot Error Caught] {context.error}")
 
 # ==================== MAIN ====================
 def main():
@@ -646,28 +610,38 @@ def main():
     server_thread = threading.Thread(target=run_web_server, daemon=True)
     server_thread.start()
 
-    # 2. Start Self-Ping Thread (2.5 min interval)
+    # 2. Start Self-Ping Thread
     ping_thread = threading.Thread(target=auto_keep_alive_ping, daemon=True)
     ping_thread.start()
 
     # 3. Load Existing Questions
     reload_questions()
 
-    # 4. Telegram Application
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    # 4. Telegram Application with CONCURRENT UPDATES & TIMEOUTS
+    # Ye setting bot ko kisi bhi halat me freeze ya hang hone se rokti hai
+    app = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .concurrent_updates(True)  # Har message parallel chalega, kabhi queue me nahi atusega
+        .read_timeout(30)
+        .write_timeout(30)
+        .connect_timeout(30)
+        .pool_timeout(30)
+        .build()
+    )
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("delete", delete_command))
+    app.add_error_handler(error_handler)
+
+    # Commands (Supports both /start and /Start)
+    app.add_handler(CommandHandler(["start", "Start"], start))
+    app.add_handler(CommandHandler(["delete", "Delete"], delete_command))
     
-    # Inline Buttons
     app.add_handler(CallbackQueryHandler(button_callback_handler))
-
-    # Handlers (Files, Text for quick Q/A add, and Voice)
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 
-    print("[Ready] Bot is active with 1-by-1 Append Mode!")
+    logger.info("[Ready] Bot is running with Concurrent Non-Blocking Engine!")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
